@@ -96,7 +96,8 @@ def _render_report(
             f"txid:        [yellow]{btc_result.txid}[/yellow]\n"
             f"network:     {btc_result.network}\n"
             f"confirmed:   {btc_result.confirmed}"
-            + (f"\nblock:       {btc_result.block_height}" if btc_result.block_height else "")
+            + (f"\nblock:       {btc_result.block_height}"
+               if btc_result.block_height is not None else "")
             + f"\nexplorer:    [cyan]{btc_result.explorer_url}[/cyan]",
             title="Anchor transaction", title_align="left", border_style="blue",
         ))
@@ -192,7 +193,12 @@ def _run_online(
     try:
         evt_dict, relay_attempts = fetch_event(event_id, relays=relays)
     except NostrFetchError as e:
-        raise click.ClickException(str(e))
+        # Surface per-relay diagnostics so the user can tell DNS
+        # failure from "event genuinely missing" from "relay buggy".
+        lines = [str(e)]
+        for a in e.attempts:
+            lines.append(f"  - {a.relay}: {a.error}")
+        raise click.ClickException("\n".join(lines))
     except ValueError as e:
         raise click.ClickException(f"bad event id: {e}")
 
@@ -227,6 +233,11 @@ def _run_online(
                 anchor_hex = btc_result.raw_hex
             except BtcFetchError as e:
                 notes_extra.append(f"anchor fetch failed: {e}")
+            except ValueError as e:
+                # fetch_tx raises ValueError on a checkpoint with a
+                # malformed anchor_txid (wrong length or non-hex). Surface
+                # as a soft note instead of an unhandled traceback.
+                notes_extra.append(f"checkpoint anchor_txid is malformed: {e}")
         else:
             notes_extra.append(
                 "checkpoint event has no anchor_txid; nothing to look up on-chain"

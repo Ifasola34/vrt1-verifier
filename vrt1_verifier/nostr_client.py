@@ -29,7 +29,16 @@ DEFAULT_RELAYS = (
 
 
 class NostrFetchError(Exception):
-    """Raised when no relay returned the requested event."""
+    """Raised when no relay returned the requested event.
+
+    Carries the per-relay `attempts` list so the CLI/caller can show
+    the user WHY each relay failed (DNS, timeout, EOSE-with-no-event,
+    response-bound exhausted, etc.) instead of a bare "not found".
+    """
+
+    def __init__(self, message: str, attempts: list["NostrRelayAttempt"] | None = None) -> None:
+        super().__init__(message)
+        self.attempts = attempts or []
 
 
 @dataclass
@@ -43,11 +52,15 @@ def _fetch_from_one_relay(
     relay_url: str,
     event_id_hex: str,
     timeout_seconds: float,
-) -> dict | None:
-    """Connect to a single relay, request an event by id, return the event dict
-    or None if the relay had nothing.
+) -> tuple[dict | None, str | None]:
+    """Connect to a single relay, request an event by id, return
+    (event_dict_or_None, reason_or_None).
 
-    Raises (anything WebSocketException can throw) on connection failure.
+    `reason` is None on clean success (event found OR EOSE with no
+    matching event). Otherwise it describes why we gave up — so the
+    caller can distinguish "relay said nothing" from "we hit our
+    read-budget on a chatty relay" from "an unrelated subscription
+    was closed". Raises on connection failure.
     """
     sub_id = secrets.token_hex(8)
     ws = websocket.create_connection(relay_url, timeout=timeout_seconds)
@@ -55,6 +68,7 @@ def _fetch_from_one_relay(
         req = json.dumps(["REQ", sub_id, {"ids": [event_id_hex]}])
         ws.send(req)
         event: dict | None = None
+        reason: str | None = None
         # Read until EOSE or until we get our event. Bounded by message count
         # so a chatty relay can't hang us forever.
         for _ in range(64):
@@ -69,13 +83,19 @@ def _fetch_from_one_relay(
                 event = msg[2]
             elif msg[0] == "EOSE" and msg[1] == sub_id:
                 break
-            elif msg[0] == "CLOSED":
+            elif msg[0] == "CLOSED" and len(msg) >= 2 and msg[1] == sub_id:
+                # Only break on a CLOSED for OUR sub_id, not an unrelated one.
                 break
+        else:
+            # Loop hit its bound without ever seeing our EOSE — tell the
+            # caller so they can distinguish this from a clean "no event".
+            if event is None:
+                reason = "read budget (64 frames) exhausted before EOSE"
         try:
             ws.send(json.dumps(["CLOSE", sub_id]))
         except Exception:
             pass
-        return event
+        return event, reason
     finally:
         try:
             ws.close()
@@ -100,7 +120,9 @@ def fetch_event(
     attempts: list[NostrRelayAttempt] = []
     for relay in relays:
         try:
-            event = _fetch_from_one_relay(relay, event_id_hex, timeout_seconds)
+            event, reason = _fetch_from_one_relay(
+                relay, event_id_hex, timeout_seconds,
+            )
         except Exception as e:
             attempts.append(NostrRelayAttempt(relay=relay, ok=False, error=str(e)))
             continue
@@ -108,10 +130,13 @@ def fetch_event(
             attempts.append(NostrRelayAttempt(relay=relay, ok=True, error=None))
             return event, attempts
         attempts.append(NostrRelayAttempt(
-            relay=relay, ok=False, error="relay returned EOSE with no matching event",
+            relay=relay, ok=False,
+            error=reason or "relay returned EOSE with no matching event",
         ))
+    # Attach per-relay failures to the exception so the CLI can render them.
     raise NostrFetchError(
-        f"event {event_id_hex} not found on any of {len(attempts)} relays"
+        f"event {event_id_hex} not found on any of {len(attempts)} relays",
+        attempts=attempts,
     )
 
 
@@ -142,6 +167,7 @@ def fetch_checkpoint_for_attestation(
         "#d": [f"checkpoint:{epoch_tag}"],
         "limit": 1,
     }
+    expected_d_tag = f"checkpoint:{epoch_tag}"
     attempts: list[NostrRelayAttempt] = []
     for relay in relays:
         try:
@@ -164,8 +190,21 @@ def fetch_checkpoint_for_attestation(
                 if not isinstance(msg, list) or len(msg) < 2:
                     continue
                 if msg[0] == "EVENT" and len(msg) >= 3 and msg[1] == sub_id:
-                    event = msg[2]
-                    break
+                    candidate = msg[2]
+                    # Re-verify the d-tag client-side: some relays
+                    # ignore the #d filter and stream all kind:30079
+                    # events from the author. Without this check we
+                    # could accept a wrong-epoch checkpoint, which
+                    # verify_full would later report as a confusing
+                    # "root mismatch" instead of "no matching checkpoint".
+                    if any(
+                        len(t) >= 2 and t[0] == "d" and t[1] == expected_d_tag
+                        for t in candidate.get("tags", [])
+                    ):
+                        event = candidate
+                        break
+                    # Otherwise keep reading — the relay might send our
+                    # match in a later frame.
                 if msg[0] == "EOSE" and msg[1] == sub_id:
                     break
             try:

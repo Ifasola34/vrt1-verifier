@@ -27,6 +27,20 @@ def test_fetch_tx_validates_txid_length():
         fetch_tx("short", network="signet")
 
 
+def test_fetch_tx_rejects_non_hex_txid_alphabet():
+    """Round-2 fix: a 64-char string that passes the length check but
+    contains URL meta-characters ('?', '#', '/') could alter the
+    request URL when interpolated."""
+    bad = "a" * 60 + "?x=/"   # 64 chars, but not hex
+    with pytest.raises(ValueError, match="hex characters"):
+        fetch_tx(bad, network="signet")
+    # Newline injection variant (also exactly 64 chars).
+    bad2 = "a" * 62 + "\nx"
+    assert len(bad2) == 64
+    with pytest.raises(ValueError, match="hex characters"):
+        fetch_tx(bad2, network="signet")
+
+
 def test_fetch_tx_success_with_confirmation():
     raw_hex = "02000000" + "00" * 100
     meta = {

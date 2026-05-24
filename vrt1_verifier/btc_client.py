@@ -52,6 +52,12 @@ def fetch_tx(
         )
     if not txid or len(txid) != 64:
         raise ValueError("txid must be 64 hex chars")
+    if not all(c in "0123456789abcdefABCDEF" for c in txid):
+        # Alphabet check matters before interpolating into a URL — a
+        # txid with '?', '#', '/' or other URL meta-chars would alter
+        # the request path/query against the explorer. The length-only
+        # check (above) was insufficient.
+        raise ValueError("txid must contain only hex characters")
     base = _NETWORK_BASES[network]
 
     # 1. Raw hex
