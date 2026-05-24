@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+.DS_Store
+
+# Local-only docs (not for public repo)
+EXPLAINER.md
+diagrams/
+GRANT_NOTES.md
