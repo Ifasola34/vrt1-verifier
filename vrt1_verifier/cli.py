@@ -233,10 +233,11 @@ def _run_online(
                 anchor_hex = btc_result.raw_hex
             except BtcFetchError as e:
                 notes_extra.append(f"anchor fetch failed: {e}")
-            except ValueError as e:
-                # fetch_tx raises ValueError on a checkpoint with a
-                # malformed anchor_txid (wrong length or non-hex). Surface
-                # as a soft note instead of an unhandled traceback.
+            except (ValueError, TypeError) as e:
+                # fetch_tx raises ValueError on malformed hex/length.
+                # TypeError if the checkpoint's anchor tag value is a
+                # non-string (list/dict/int from a buggy relay). Surface
+                # both as soft notes instead of unhandled tracebacks.
                 notes_extra.append(f"checkpoint anchor_txid is malformed: {e}")
         else:
             notes_extra.append(
@@ -276,15 +277,21 @@ def _run_offline(
     *, attestation_file: str, proof_file: str | None,
     checkpoint_file: str | None, anchor_raw_hex: str | None,
 ) -> None:
+    # Catch the full family of malformed-input exceptions: ValueError
+    # (bad hex / wrong shape), KeyError (missing required field),
+    # TypeError (e.g., `attestation` is a string instead of a dict),
+    # AttributeError (e.g., calling .get on a non-dict).
     try:
         signed = SignedAttestation.from_json(Path(attestation_file).read_text())
-    except (ValueError, KeyError) as e:
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise click.ClickException(f"invalid attestation file: {e}")
 
     proof = None
     if proof_file:
         try:
             d = json.loads(Path(proof_file).read_text())
+            if not isinstance(d, dict):
+                raise ValueError("proof file root must be a JSON object")
             proof = MerkleProof(
                 leaf=bytes.fromhex(d["leaf_hex"]),
                 siblings=[bytes.fromhex(s) for s in d["siblings_hex"]],
@@ -293,7 +300,7 @@ def _run_offline(
                 size=int(d["size"]),
                 index=int(d["index"]),
             )
-        except (ValueError, KeyError, json.JSONDecodeError) as e:
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
             raise click.ClickException(f"invalid proof file: {e}")
 
     cp_event = None
@@ -303,10 +310,24 @@ def _run_offline(
             d = json.loads(Path(checkpoint_file).read_text())
         except json.JSONDecodeError as e:
             raise click.ClickException(f"invalid checkpoint file: {e}")
-        if d.get("checkpoint_event"):
-            cp_event = _nostr_event_from_dict(d["checkpoint_event"])
-        if anchor_hex is None and d.get("anchor") and d["anchor"].get("raw_hex"):
-            anchor_hex = d["anchor"]["raw_hex"]
+        if not isinstance(d, dict):
+            raise click.ClickException(
+                "checkpoint file root must be a JSON object"
+            )
+        try:
+            if d.get("checkpoint_event"):
+                ce = d["checkpoint_event"]
+                if not isinstance(ce, dict):
+                    raise click.ClickException(
+                        "checkpoint_event must be a JSON object"
+                    )
+                cp_event = _nostr_event_from_dict(ce)
+            if anchor_hex is None and d.get("anchor"):
+                anchor = d["anchor"]
+                if isinstance(anchor, dict) and anchor.get("raw_hex"):
+                    anchor_hex = anchor["raw_hex"]
+        except (TypeError, AttributeError) as e:
+            raise click.ClickException(f"invalid checkpoint file shape: {e}")
 
     result = verify_full(
         signed=signed, proof=proof,

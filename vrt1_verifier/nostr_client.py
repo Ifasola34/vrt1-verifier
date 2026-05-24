@@ -72,7 +72,16 @@ def _fetch_from_one_relay(
         # Read until EOSE or until we get our event. Bounded by message count
         # so a chatty relay can't hang us forever.
         for _ in range(64):
-            raw = ws.recv()
+            try:
+                raw = ws.recv()
+            except Exception:
+                # WebSocket dropped mid-stream — match the defensive
+                # pattern used by fetch_checkpoint_for_attestation
+                # below. If we already collected `event` earlier we
+                # return it; otherwise fall through to the empty-event
+                # path. This avoids losing a valid event already in
+                # hand to a flaky relay.
+                break
             try:
                 msg = json.loads(raw)
             except (ValueError, TypeError):
@@ -191,21 +200,24 @@ def fetch_checkpoint_for_attestation(
                     continue
                 if msg[0] == "EVENT" and len(msg) >= 3 and msg[1] == sub_id:
                     candidate = msg[2]
-                    # Re-verify the d-tag client-side: some relays
-                    # ignore the #d filter and stream all kind:30079
-                    # events from the author. Without this check we
-                    # could accept a wrong-epoch checkpoint, which
-                    # verify_full would later report as a confusing
-                    # "root mismatch" instead of "no matching checkpoint".
-                    if any(
-                        len(t) >= 2 and t[0] == "d" and t[1] == expected_d_tag
-                        for t in candidate.get("tags", [])
-                    ):
-                        event = candidate
-                        break
+                    # Defensive: a malicious relay could send candidate
+                    # as a non-dict ("not a dict") or {"tags": null}.
+                    # Skip such garbage rather than crashing the fetcher.
+                    try:
+                        tags = candidate.get("tags", [])
+                        if not isinstance(tags, list):
+                            continue
+                        if any(
+                            len(t) >= 2 and t[0] == "d" and t[1] == expected_d_tag
+                            for t in tags
+                        ):
+                            event = candidate
+                            break
+                    except (AttributeError, TypeError):
+                        continue
                     # Otherwise keep reading — the relay might send our
                     # match in a later frame.
-                if msg[0] == "EOSE" and msg[1] == sub_id:
+                elif msg[0] == "EOSE" and msg[1] == sub_id:
                     break
             try:
                 ws.send(json.dumps(["CLOSE", sub_id]))

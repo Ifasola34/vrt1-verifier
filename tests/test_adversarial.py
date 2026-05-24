@@ -339,6 +339,95 @@ def test_cli_offline_rejects_truncated_attestation_file(tmp_path):
     assert "invalid attestation" in r.output.lower()
 
 
+def test_cli_offline_rejects_attestation_with_string_instead_of_dict(tmp_path):
+    """Round-3 fix: valid-JSON-but-wrong-shape (attestation is a string,
+    not a dict) used to crash with TypeError. Now: clean ClickException."""
+    p = tmp_path / "bad.json"
+    p.write_text('{"attestation": "oops-not-a-dict", "sig": "00"}')
+    runner = CliRunner()
+    r = runner.invoke(main, ["--attestation-file", str(p)])
+    assert r.exit_code != 0
+    assert "invalid attestation" in r.output.lower()
+
+
+def test_cli_offline_rejects_checkpoint_with_string_checkpoint_event(tmp_path):
+    """Round-3 fix: checkpoint file where checkpoint_event is a string
+    instead of a dict used to crash with AttributeError on .keys()."""
+    att_p = tmp_path / "att.json"
+    # Build a real signed attestation to satisfy the first parse.
+    from veritas.attestation import make_attestation, sign_attestation
+    k = OracleKey.generate()
+    a = make_attestation(
+        model="m", input_hash="ab" * 32, output={"x": 1},
+        epoch=5, oracle_pubkey_hex=k.xonly_pubkey_hex,
+    )
+    att_p.write_text(sign_attestation(a, k).to_json())
+
+    cp_p = tmp_path / "cp.json"
+    cp_p.write_text('{"checkpoint_event": "oops-not-a-dict"}')
+    runner = CliRunner()
+    r = runner.invoke(main, [
+        "--attestation-file", str(att_p),
+        "--checkpoint-file", str(cp_p),
+    ])
+    assert r.exit_code != 0
+    assert "checkpoint" in r.output.lower()
+
+
+def test_fetch_checkpoint_handles_non_dict_event_payload():
+    """Round-3 fix: a malicious relay sending
+    ['EVENT', '<sub>', 'not-a-dict'] used to crash with AttributeError
+    on candidate.get('tags'). Now: skip the garbage and keep reading."""
+    from vrt1_verifier.nostr_client import fetch_checkpoint_for_attestation
+
+    att_event = {
+        "id": "aa" * 32, "pubkey": "bb" * 32, "kind": 30078,
+        "created_at": 1, "tags": [["d", "5:0"], ["epoch", "5"]],
+        "content": "", "sig": "00" * 64,
+    }
+    ws = MagicMock()
+    # Garbage EVENT followed by EOSE.
+    ws.recv.side_effect = [
+        json.dumps(["EVENT", "deadbeef", "not-a-dict"]),
+        json.dumps(["EVENT", "deadbeef", {"tags": None}]),  # tags is null
+        json.dumps(["EOSE", "deadbeef"]),
+    ]
+    with patch("vrt1_verifier.nostr_client.secrets.token_hex",
+               return_value="deadbeef"), \
+         patch("vrt1_verifier.nostr_client.websocket.create_connection",
+               return_value=ws):
+        cp, _ = fetch_checkpoint_for_attestation(
+            att_event, relays=("wss://malicious",),
+        )
+    # No crash; just no checkpoint found.
+    assert cp is None
+
+
+def test_fetch_event_recv_exception_doesnt_lose_already_collected_event():
+    """Round-3 fix: a WebSocket drop mid-read should NOT discard an
+    event we already collected — the recv() is now wrapped to break
+    cleanly out of the loop instead of escaping."""
+    fake_event = {
+        "id": "aa" * 32, "pubkey": "bb" * 32, "kind": 30078,
+        "created_at": 1, "tags": [], "content": "", "sig": "00" * 64,
+    }
+    ws = MagicMock()
+    ws.recv.side_effect = [
+        json.dumps(["EVENT", "deadbeef", fake_event]),
+        Exception("websocket dropped"),   # next recv raises
+    ]
+    with patch("vrt1_verifier.nostr_client.secrets.token_hex",
+               return_value="deadbeef"), \
+         patch("vrt1_verifier.nostr_client.websocket.create_connection",
+               return_value=ws):
+        from vrt1_verifier.nostr_client import fetch_event
+        event, attempts = fetch_event("aa" * 32, relays=("wss://r",))
+    # The valid event we already received must be returned, NOT lost
+    # to the subsequent recv exception.
+    assert event is not None
+    assert event["id"] == "aa" * 32
+
+
 # ---------- baseline stability ----------------------------------
 
 
