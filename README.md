@@ -1,5 +1,9 @@
 # vrt1-verifier
 
+[![CI](https://github.com/Ifasola34/vrt1-verifier/actions/workflows/ci.yml/badge.svg)](https://github.com/Ifasola34/vrt1-verifier/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
 **Third-party verifier for [VERITAS](https://github.com/Ifasola34/veritas) (VRT1) Bitcoin-anchored AI attestations.**
 
 Anyone can verify a VERITAS attestation without ever touching the oracle's code, without trusting any company, and without an account anywhere. This tool pulls the artifacts off the public Nostr network and Bitcoin block explorers, then runs the full binding chain and tells you what passed and what didn't.
