@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: System :: Networking",
 ]
 dependencies = [
-    "veritas @ git+https://github.com/Ifasola34/veritas.git",
+    "veritas @ git+https://github.com/Ifasola34/veritas.git@v0.1.0",
     "click>=8.0",
     "rich>=13.0",
     "websocket-client>=1.6",
